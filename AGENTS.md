@@ -1,11 +1,15 @@
 # TradingAgents fork
 
-## VPS-Status (2026-11-10, 17:04 CET)
+## VPS-Status (2026-11-10, aktualisiert 17:36 CET)
 
 Auf Nutzerwunsch zurueck zum urspruenglichen Qwen-Scanner ohne Gateway;
 beide TradingAgents-Dienste inaktiv und deaktiviert. Fork/Code erhalten.
-Standalone laeuft auf OpenRouter mit 60s und bewahrt aktuelle Daten; erster
-regulaerer Durchlauf nach Neustart noch offen.
+Standalone laeuft auf OpenRouter mit 60s und bewahrt aktuelle Daten. Erster
+regulaerer Durchlauf: sechs HOLD, ein LINK-Timeout, kein Telegram-Signal.
+Standalone-Modelltimeout anschliessend von 25 auf 40s erhoeht; Signalalter
+60s, Kursalter 5s und deaktivierte Gateways bleiben. Scanner und Heartbeat
+nach Startpruefungsfehler lesend verifiziert. Erster Lauf mit 40s: sieben HOLD,
+kein Modelltimeout oder Telegram-Signal. Langzeitstabilitaet bleibt offen.
 
 ## Scanner-Rollenmodelle (2026-11-10, 08:13–17:04 CET, historisch)
 
