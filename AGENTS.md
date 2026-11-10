@@ -10,7 +10,10 @@ Bull/Bear/Risk analysieren zeitgleich unabhaengig; Judge wartet auf alle drei.
 Timeout/Fehler bricht Peers ab und sperrt Judge. Barrier- und Abbruchtests gruen.
 Exakter GLM-Flash-Latest-Alias fordert Reasoning aus fuer geringere Latenz;
 Qualitaetswirkung ungeprueft, Aliasziel kann wechseln.
-VPS-Umschaltung, echter paralleler Mehrmodell-Live-Test und Trefferquote offen.
+VPS-Gateway `tradingagents-gateway-roles.service` :18766 aktiv; Bull Mistral
+Nemo, Bear GLM-Alias, Risk/Judge Qwen Flash. Zwei isolierte BingX/OpenRouter-
+Proben ergaben VETO nach 14,79/12,31 s; 73 VPS-Tests. Natuerliche Live-Signale,
+Timeoutquote und Trefferquote offen; altes Gateway :18765 bleibt als Standby.
 
 ## Scanner gateway (2026-11-09)
 
