@@ -9,6 +9,18 @@ import pytest
 from tradingagents.scanner_gateway import make_handler, process_candidate, validate_candidate
 
 
+def prompt_role(system):
+    if 'strongest evidence for upside' in system:
+        return 'bull'
+    if 'strongest evidence for downside' in system:
+        return 'bear'
+    if 'Identify risk' in system:
+        return 'risk'
+    if 'Decide on this exact' in system:
+        return 'judge'
+    raise AssertionError('unknown agent role')
+
+
 @pytest.fixture(autouse=True)
 def isolated_audit_directory(monkeypatch, tmp_path):
     monkeypatch.setenv("TRADINGAGENTS_AUDIT_DIR", str(tmp_path / "audit"))
@@ -156,7 +168,8 @@ def test_graph_stops_next_model_calls_when_client_disconnects(monkeypatch):
     with pytest.raises(GatewayFailure) as error:
         runner(validate_candidate(candidate(now), now), cancelled=lambda: len(calls) >= 1)
     assert error.value.code == "timeout"
-    assert len(calls) == 1
+    assert 1 <= len(calls) <= 3
+    assert all(prompt_role(messages[0][1]) != 'judge' for messages in calls)
 
 
 def test_model_timeout_cancels_work_and_prevents_subsequent_calls(monkeypatch):
@@ -183,7 +196,8 @@ def test_model_timeout_cancels_work_and_prevents_subsequent_calls(monkeypatch):
     now = datetime.now(timezone.utc)
     result = gateway.process_candidate(candidate(now), runner)
     assert result["action"] == "HOLD"
-    assert len(calls) == 1 and cancelled == [True]
+    assert len(calls) == len(cancelled) == 3
+    assert {prompt_role(messages[0][1]) for messages in calls} == {'bull', 'bear', 'risk'}
 
 
 def test_http_disconnect_stops_further_model_requests(monkeypatch):
@@ -217,7 +231,8 @@ def test_http_disconnect_stops_further_model_requests(monkeypatch):
         assert first_started.wait(2)
         sock.close()
         time.sleep(.3)
-        assert len(calls) == 1
+        assert 1 <= len(calls) <= 3
+        assert all(prompt_role(messages[0][1]) != 'judge' for messages in calls)
     finally:
         server.shutdown()
         server.server_close()
@@ -452,7 +467,7 @@ def test_model_failure_logs_only_safe_stage_and_error_code(monkeypatch, caplog):
     class FakeLLM:
         async def ainvoke(self, messages, **kwargs):
             calls.append(messages)
-            if len(calls) == 2:
+            if prompt_role(messages[0][1]) == 'bear':
                 raise RateLimitError(sentinel)
             return SimpleNamespace(content="analysis", response_metadata={"finish_reason": "stop"})
     class FakeClient:
@@ -468,7 +483,7 @@ def test_model_failure_logs_only_safe_stage_and_error_code(monkeypatch, caplog):
     assert "code=rate_limit" in caplog.text
     assert sentinel not in caplog.text
     assert "telegramText" not in caplog.text
-    assert len(calls) == 2
+    assert {prompt_role(messages[0][1]) for messages in calls} == {'bull', 'bear', 'risk'}
 
 
 def test_validation_failure_logs_no_data_or_exception_message(caplog):
@@ -498,7 +513,8 @@ def test_empty_model_output_identifies_role_without_logging_secret(monkeypatch, 
     with caplog.at_level(logging.WARNING, logger="tradingagents.scanner_gateway"):
         result = process_candidate(candidate(datetime.now(timezone.utc)), build_agent_runner("qwen/quick", "qwen/deep"))
     assert result["action"] == "HOLD"
-    assert "stage=bull" in caplog.text and "code=empty_length" in caplog.text
+    assert any(f"stage={role}" in caplog.text for role in ('bull', 'bear', 'risk'))
+    assert "code=empty_length" in caplog.text
     assert "HIDDEN_SECRET" not in caplog.text
 
 
@@ -542,8 +558,9 @@ def test_role_models_and_qwen_reasoning_in_actual_local_openai_http_payload(monk
             pass
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            captured.append(payload)
-            content = json.dumps({"id": "btc-test-1", "direction": "LONG", "action": "APPROVE", "reason": "Okay"}) if len(captured) == 4 else "Analysis"
+            role = prompt_role(payload["messages"][0]["content"])
+            captured.append((role, payload))
+            content = json.dumps({"id": "btc-test-1", "direction": "LONG", "action": "APPROVE", "reason": "Okay"}) if role == 'judge' else "Analysis"
             resolved = "z-ai/glm-5.3-flash" if payload["model"] == "~z-ai/glm-flash-latest" else payload["model"]
             body = json.dumps({"id": "test", "object": "chat.completion", "created": 1, "model": resolved,
                                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
@@ -570,20 +587,22 @@ def test_role_models_and_qwen_reasoning_in_actual_local_openai_http_payload(monk
                                       role_models={"bull": "mistralai/mistral-nemo", "bear": "~z-ai/glm-flash-latest"}))
         assert result["action"] == "APPROVE"
         assert len(captured) == 4
-        assert [x["model"] for x in captured] == ["mistralai/mistral-nemo", "~z-ai/glm-flash-latest",
-                                                    "qwen/qwen3.8-flash", "qwen/qwen3.8-max-0902"]
-        assert all("reasoning" not in x for x in captured[:2])
-        assert captured[2]["reasoning"] == {"enabled": False}
-        assert captured[3]["reasoning"] == {"effort": "minimal"}
-        assert all(x.get("max_completion_tokens", x.get("max_tokens")) == 2048 for x in captured)
-        assert all(x["usage"] == {"include": True} for x in captured)
+        by_role = dict(captured)
+        assert {r: x["model"] for r, x in captured} == {'bull': 'mistralai/mistral-nemo',
+            'bear': '~z-ai/glm-flash-latest', 'risk': 'qwen/qwen3.8-flash', 'judge': 'qwen/qwen3.8-max-0902'}
+        assert "reasoning" not in by_role['bull']
+        assert by_role['bear']["reasoning"] == {"enabled": False}
+        assert by_role['risk']["reasoning"] == {"enabled": False}
+        assert by_role['judge']["reasoning"] == {"effort": "minimal"}
+        assert all(x.get("max_completion_tokens", x.get("max_tokens")) == 2048 for _, x in captured)
+        assert all(x["usage"] == {"include": True} for _, x in captured)
         events = [json.loads(line) for line in (tmp_path / "audit" / "openrouter-usage.jsonl").read_text().splitlines()]
         assert all(e["usage"]["input_tokens"] == 11 and e["usage"]["output_tokens"] == 7
                    and e["usage"]["cost_usd"] == .012 and e["usage"]["cost_status"] == "reported"
                    for e in events if e["event"] == "completed")
-        completed = [e for e in events if e["event"] == "completed"]
-        assert completed[1]["model"] == "~z-ai/glm-flash-latest"
-        assert completed[1]["resolved_model"] == "z-ai/glm-5.3-flash"
+        completed = {e['role']: e for e in events if e["event"] == "completed"}
+        assert completed['bear']["model"] == "~z-ai/glm-flash-latest"
+        assert completed['bear']["resolved_model"] == "z-ai/glm-5.3-flash"
     finally:
         server.shutdown()
         server.server_close()
@@ -612,10 +631,12 @@ def test_audit_start_precedes_each_call_and_reported_usage_is_not_estimated(monk
     class FakeLLM:
         async def ainvoke(self, messages, **kwargs):
             events = [json.loads(line) for line in audit_file.read_text().splitlines()]
-            assert events[-1]["event"] == "start"
+            role = prompt_role(messages[0][1])
+            own_events = [e for e in events if e['role'] == role]
+            assert len(own_events) == 1 and own_events[0]['event'] == 'start'
             assert kwargs["extra_body"]["usage"] == {"include": True}
             calls.append(messages)
-            content = json.dumps({"id": "btc-test-1", "direction": "LONG", "action": "APPROVE", "reason": "Okay"}) if len(calls) == 4 else "Analysis"
+            content = json.dumps({"id": "btc-test-1", "direction": "LONG", "action": "APPROVE", "reason": "Okay"}) if role == 'judge' else "Analysis"
             usage = {"prompt_tokens": 11, "completion_tokens": 7, "cost": .012}
             return SimpleNamespace(content=content, response_metadata={"finish_reason": "stop", "token_usage": usage})
     class FakeClient:
@@ -626,9 +647,13 @@ def test_audit_start_precedes_each_call_and_reported_usage_is_not_estimated(monk
     data["telegramText"] = "TOP_SECRET_TOKEN"
     assert process_candidate(data, build_agent_runner("test/quick", "test/deep"))["action"] == "APPROVE"
     events = [json.loads(line) for line in audit_file.read_text().splitlines()]
-    assert [e["event"] for e in events] == ["start", "completed"] * 4
     assert len({e["attempt_id"] for e in events if e["event"] == "start"}) == 4
-    completed = events[1::2]
+    for attempt in {e['attempt_id'] for e in events}:
+        assert [e['event'] for e in events if e['attempt_id'] == attempt] == ['start', 'completed']
+    judge_start = next(i for i, e in enumerate(events) if e['role'] == 'judge' and e['event'] == 'start')
+    assert all(any(e['role'] == role and e['event'] == 'completed' for e in events[:judge_start])
+               for role in ('bull', 'bear', 'risk'))
+    completed = [e for e in events if e['event'] == 'completed']
     assert all(e["usage"]["input_tokens"] == 11 and e["usage"]["output_tokens"] == 7 for e in completed)
     assert all(e["usage"]["cost_usd"] == .012 for e in completed)
     assert "TOP_SECRET_TOKEN" not in audit_file.read_text()
@@ -643,8 +668,9 @@ def test_missing_usage_and_failure_are_unknown_not_zero(monkeypatch, tmp_path):
     calls = []
     class FakeLLM:
         async def ainvoke(self, messages, **kwargs):
-            calls.append(1)
-            if len(calls) == 2:
+            role = prompt_role(messages[0][1])
+            calls.append(role)
+            if role == 'bear':
                 raise TimeoutError("TOP_SECRET_TOKEN")
             return SimpleNamespace(content="Analysis", response_metadata={"finish_reason": "stop"})
     class FakeClient:
@@ -654,10 +680,12 @@ def test_missing_usage_and_failure_are_unknown_not_zero(monkeypatch, tmp_path):
     assert process_candidate(candidate(datetime.now(timezone.utc)), build_agent_runner("test/quick", "test/deep"))["action"] == "HOLD"
     text = (tmp_path / "audit" / "openrouter-usage.jsonl").read_text()
     events = [json.loads(line) for line in text.splitlines()]
-    assert [e["event"] for e in events] == ["start", "completed", "start", "failed"]
-    assert events[1]["usage"]["cost_usd"] is None
-    assert events[-1]["usage"]["cost_usd"] is None
-    assert events[-1]["code"] == "timeout"
+    assert set(calls) == {'bull', 'bear', 'risk'}
+    assert all(e['usage']['cost_usd'] is None for e in events)
+    assert any(e['role'] == 'bear' and e['event'] == 'failed' and e['code'] == 'timeout' for e in events)
+    for attempt in {e['attempt_id'] for e in events}:
+        kinds = [e['event'] for e in events if e['attempt_id'] == attempt]
+        assert kinds in (['start', 'completed'], ['start', 'failed'])
     assert "TOP_SECRET_TOKEN" not in text
 
 
@@ -677,7 +705,8 @@ def test_unknown_model_exception_logs_safe_type_without_secret(monkeypatch, capl
     with caplog.at_level(logging.WARNING, logger="tradingagents.scanner_gateway"):
         result = process_candidate(candidate(datetime.now(timezone.utc)), build_agent_runner("test/quick", "test/deep"))
     assert result["action"] == "HOLD"
-    assert "stage=bull" in caplog.text and "code=error" in caplog.text
+    assert any(f"stage={role}" in caplog.text for role in ('bull', 'bear', 'risk'))
+    assert "code=error" in caplog.text
     assert "type=MysteryTransportError" in caplog.text
     assert "API_KEY_MUST_NEVER_APPEAR" not in caplog.text
 
@@ -845,7 +874,7 @@ def test_disconnect_after_audit_start_records_unknown_and_skips_provider(monkeyp
     now = datetime.now(timezone.utc)
     with pytest.raises(gateway.GatewayFailure) as error:
         runner(gateway.validate_candidate(candidate(now), now), cancelled=lambda: bool(events))
-    assert error.value.code == "cancelled"
+    assert error.value.code in ("cancelled", "timeout")
     assert [event["event"] for event in events] == ["start", "failed"]
     assert events[-1]["usage"]["cost_status"] == "unknown"
 
@@ -964,9 +993,10 @@ def test_role_models_are_used_and_provider_resolution_is_audited(monkeypatch, tm
         def __init__(self, model):
             self.model = model
         async def ainvoke(self, messages, **kwargs):
-            calls.append(self.model)
+            role = prompt_role(messages[0][1])
+            calls.append((role, self.model))
             content = (json.dumps({'id': 'btc-test-1', 'direction': 'LONG', 'action': 'APPROVE', 'reason': 'OK'})
-                       if len(calls) == 4 else 'Analysis')
+                       if role == 'judge' else 'Analysis')
             resolved = 'z-ai/glm-5.3-flash' if self.model.startswith('~') else self.model
             return SimpleNamespace(content=content, response_metadata={'finish_reason': 'stop', 'model_name': resolved})
     class FakeClient:
@@ -981,11 +1011,11 @@ def test_role_models_are_used_and_provider_resolution_is_audited(monkeypatch, tm
                                 role_models={k: v for k, v in expected.items() if k != 'judge'})
     assert runner.gateway_identity['roleModels'] == expected
     assert process_candidate(candidate(datetime.now(timezone.utc)), runner)['action'] == 'APPROVE'
-    assert calls == list(expected.values())
+    assert dict(calls) == expected
     events = [json.loads(line) for line in (tmp_path / 'audit' / 'openrouter-usage.jsonl').read_text().splitlines()]
-    completed = [event for event in events if event['event'] == 'completed']
-    assert [(event['role'], event['model']) for event in completed] == list(expected.items())
-    assert completed[1]['resolved_model'] == 'z-ai/glm-5.3-flash'
+    completed = {event['role']: event for event in events if event['event'] == 'completed'}
+    assert {role: event['model'] for role, event in completed.items()} == expected
+    assert completed['bear']['resolved_model'] == 'z-ai/glm-5.3-flash'
 
 
 @pytest.mark.parametrize('overrides', [
@@ -1060,3 +1090,133 @@ def test_handler_rejects_missing_invalid_or_unbound_role_identity(roles):
                               'quickModel': 'test/quick', 'deepModel': 'test/deep', 'roleModels': roles}
     with pytest.raises(ValueError):
         make_handler(graph, 'secret')
+
+
+def test_analysts_start_together_and_judge_waits_for_every_independent_result(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    import tradingagents.llm_clients as clients
+    from tradingagents.scanner_gateway import build_agent_runner
+
+    started, completed, contexts = set(), set(), {}
+    all_started = asyncio.Event()
+    class FakeLLM:
+        async def ainvoke(self, messages, **kwargs):
+            system = messages[0][1]
+            role = ('bull' if 'strongest evidence for upside' in system else
+                    'bear' if 'strongest evidence for downside' in system else
+                    'risk' if 'Identify risk' in system else 'judge')
+            context = json.loads(messages[1][1])
+            contexts[role] = context
+            if role == 'judge':
+                assert completed == {'bull', 'bear', 'risk'}
+                assert {k: context[k] for k in completed} == {k: k + ' analysis' for k in completed}
+                content = json.dumps({'id': 'btc-test-1', 'direction': 'LONG', 'action': 'APPROVE', 'reason': 'OK'})
+            else:
+                started.add(role)
+                if len(started) == 3:
+                    all_started.set()
+                await asyncio.wait_for(all_started.wait(), timeout=.3)
+                assert set(context) == {'candidate'}
+                completed.add(role)
+                content = role + ' analysis'
+            return SimpleNamespace(content=content, response_metadata={'finish_reason': 'stop'})
+    class FakeClient:
+        def get_llm(self):
+            return FakeLLM()
+    monkeypatch.setattr(clients, 'create_llm_client', lambda *args, **kwargs: FakeClient())
+    result = process_candidate(candidate(datetime.now(timezone.utc)), build_agent_runner('test/quick', 'test/judge'))
+    assert result['action'] == 'APPROVE'
+    assert started == completed == {'bull', 'bear', 'risk'}
+    assert len({json.dumps(contexts[r]['candidate'], sort_keys=True) for r in started}) == 1
+
+
+def test_failed_analyst_cancels_peers_and_never_calls_judge(monkeypatch, tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    import tradingagents.llm_clients as clients
+    from tradingagents.scanner_gateway import build_agent_runner
+
+    started, cancelled = set(), set()
+    all_started = asyncio.Event()
+    class FakeLLM:
+        async def ainvoke(self, messages, **kwargs):
+            system = messages[0][1]
+            role = ('bull' if 'strongest evidence for upside' in system else
+                    'bear' if 'strongest evidence for downside' in system else
+                    'risk' if 'Identify risk' in system else 'judge')
+            started.add(role)
+            if len(started) == 3:
+                all_started.set()
+            await asyncio.wait_for(all_started.wait(), timeout=.3)
+            if role == 'bear':
+                raise TimeoutError('irrelevant provider detail')
+            try:
+                await asyncio.sleep(3)
+            except asyncio.CancelledError:
+                cancelled.add(role)
+                raise
+            return SimpleNamespace(content='analysis', response_metadata={'finish_reason': 'stop'})
+    class FakeClient:
+        def get_llm(self):
+            return FakeLLM()
+    monkeypatch.setattr(clients, 'create_llm_client', lambda *args, **kwargs: FakeClient())
+    result = process_candidate(candidate(datetime.now(timezone.utc)), build_agent_runner('test/quick', 'test/judge'))
+    assert result['action'] == 'HOLD'
+    assert started == {'bull', 'bear', 'risk'}
+    assert cancelled == {'bull', 'risk'}
+    events = [json.loads(line) for line in (tmp_path / 'audit' / 'openrouter-usage.jsonl').read_text().splitlines()]
+    assert {e['role'] for e in events if e['event'] == 'start'} == started
+    assert {(e['role'], e['code']) for e in events if e['event'] == 'failed'} == {
+        ('bull', 'cancelled'), ('bear', 'timeout'), ('risk', 'cancelled')}
+
+
+def test_total_deadline_cancels_all_analysts_before_judge(monkeypatch, tmp_path):
+    import asyncio
+    import tradingagents.llm_clients as clients
+    import tradingagents.scanner_gateway as gateway
+
+    calls = []
+    class SlowLLM:
+        async def ainvoke(self, messages, **kwargs):
+            calls.append(prompt_role(messages[0][1]))
+            await asyncio.sleep(2)
+    class FakeClient:
+        def get_llm(self):
+            return SlowLLM()
+    monkeypatch.setattr(clients, 'create_llm_client', lambda *args, **kwargs: FakeClient())
+    monkeypatch.setattr(gateway, 'MAX_AGE_SECONDS', .4)
+    monkeypatch.setattr(gateway, 'PER_CALL_SECONDS', 2)
+    result = gateway.process_candidate(candidate(datetime.now(timezone.utc)),
+                                       gateway.build_agent_runner('test/quick', 'test/judge'))
+    assert result['action'] == 'HOLD'
+    assert set(calls) == {'bull', 'bear', 'risk'}
+    events = [json.loads(line) for line in (tmp_path / 'audit' / 'openrouter-usage.jsonl').read_text().splitlines()]
+    failed = [event for event in events if event['event'] == 'failed']
+    assert {event['role'] for event in failed} == set(calls)
+    assert all(event['code'] in ('timeout', 'cancelled') for event in failed)
+
+
+def test_glm_reasoning_disabled_only_for_exact_flash_alias(monkeypatch):
+    from types import SimpleNamespace
+    import tradingagents.llm_clients as clients
+    from tradingagents.scanner_gateway import build_agent_runner
+
+    calls = {}
+    class FakeLLM:
+        async def ainvoke(self, messages, **kwargs):
+            role = prompt_role(messages[0][1])
+            calls[role] = kwargs['extra_body']
+            content = (json.dumps({'id': 'btc-test-1', 'direction': 'LONG', 'action': 'APPROVE', 'reason': 'OK'})
+                       if role == 'judge' else 'Analysis')
+            return SimpleNamespace(content=content, response_metadata={'finish_reason': 'stop'})
+    class FakeClient:
+        def get_llm(self):
+            return FakeLLM()
+    monkeypatch.setattr(clients, 'create_llm_client', lambda *args, **kwargs: FakeClient())
+    runner = build_agent_runner('test/quick', 'qwen/qwen3.8-flash', role_models={
+        'bull': '~z-ai/glm-flash-latest', 'bear': 'z-ai/glm-5.3-flash', 'risk': '~z-ai/glm-flash-latest2'})
+    assert process_candidate(candidate(datetime.now(timezone.utc)), runner)['action'] == 'APPROVE'
+    assert calls['bull']['reasoning'] == {'enabled': False}
+    assert calls['judge']['reasoning'] == {'enabled': False}
+    assert 'reasoning' not in calls['bear'] and 'reasoning' not in calls['risk']

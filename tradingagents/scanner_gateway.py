@@ -358,7 +358,7 @@ def build_agent_runner(quick_model: str, deep_model: str, *, role_models: dict |
             ]
             model = models[stage]
             extra_body = {"usage": {"include": True}}
-            if model == "qwen/qwen3.8-flash":
+            if model in ("qwen/qwen3.8-flash", "~z-ai/glm-flash-latest"):
                 extra_body["reasoning"] = {"enabled": False}
             elif model == "qwen/qwen3.8-max-0902":
                 extra_body["reasoning"] = {"effort": "minimal"}
@@ -428,10 +428,9 @@ def build_agent_runner(quick_model: str, deep_model: str, *, role_models: dict |
         workflow = StateGraph(AgentState)
         for name, node in (("bull", bull), ("bear", bear), ("risk", risk), ("judge", judge)):
             workflow.add_node(name, node)
-        workflow.add_edge(START, "bull")
-        workflow.add_edge("bull", "bear")
-        workflow.add_edge("bear", "risk")
-        workflow.add_edge("risk", "judge")
+        for analyst in ("bull", "bear", "risk"):
+            workflow.add_edge(START, analyst)
+        workflow.add_edge(["bull", "bear", "risk"], "judge")
         workflow.add_edge("judge", END)
         compiled = workflow.compile()
 

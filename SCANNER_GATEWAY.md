@@ -3,7 +3,11 @@
 This fork adds `python -m tradingagents.scanner_gateway`: a bounded LangGraph
 analysis of one scanner proposal, using TradingAgents' OpenRouter client and
 separate quick/deep model names. Bull, bear, risk and decision nodes make at
-most four model requests in total. No Yahoo, news, memory, account, exchange
+most four model requests in total. Bull, bear and risk run concurrently from
+the same candidate without seeing each other's analyses. The decision node runs
+only after all three succeed and receives all three results. A failed or timed-out
+analysis cancels remaining analyses and returns HOLD without a decision call.
+Calls already sent may still be billed. No Yahoo, news, memory, account, exchange
 order or execution API is used.
 
 The input must carry an unambiguous Binance Spot or BingX Futures USDT instrument and at least
@@ -57,9 +61,11 @@ source loaded at startup. A valid model decision also contains `marketAsOf`, `ex
 `note`. The model never receives the gateway token or arbitrary Telegram text.
 
 The individual LLM calls are capped at 25 seconds and 2048 output tokens (including reasoning tokens), with
-zero SDK retries. Qwen 3.8 Flash requests disable reasoning; Qwen 3.8 Max
-requests use minimal reasoning. These request options apply only to those exact
-model IDs. Other models receive no Qwen-specific option. Bull/Bear/Risk prompts
+zero SDK retries. Qwen 3.8 Flash and the exact `~z-ai/glm-flash-latest` alias
+request reasoning disabled to reduce latency; Qwen 3.8 Max requests minimal
+reasoning. The GLM alias target can change, and the quality effect of disabling
+reasoning is unmeasured. These options apply only to those exact IDs; other
+models receive no model-specific reasoning option. Bull/Bear/Risk prompts
 request at most 100 words. Disconnection, timeouts, or snapshot expiry prevent further
 model calls. A request already sent to OpenRouter may still be billed if the
 client disconnects. No live service is installed or started by this package.

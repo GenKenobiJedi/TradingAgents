@@ -6,7 +6,11 @@ Bull, Bear und Risk optional getrennt konfigurierbar, Judge bleibt Deep-Modell.
 Responses binden alle Rollen; Audit nennt konfigurierte und, falls vom Provider
 gemeldet, konkrete Modellkennung. OpenRouter-Alias mit fuehrendem `~` erlaubt,
 ungenutzte Rollen fallen nur bei fehlender Einstellung auf Quick zurueck.
-VPS-Umschaltung, echter Mehrmodell-Live-Test und Trefferquote noch offen.
+Bull/Bear/Risk analysieren zeitgleich unabhaengig; Judge wartet auf alle drei.
+Timeout/Fehler bricht Peers ab und sperrt Judge. Barrier- und Abbruchtests gruen.
+Exakter GLM-Flash-Latest-Alias fordert Reasoning aus fuer geringere Latenz;
+Qualitaetswirkung ungeprueft, Aliasziel kann wechseln.
+VPS-Umschaltung, echter paralleler Mehrmodell-Live-Test und Trefferquote offen.
 
 ## Scanner gateway (2026-11-09)
 
