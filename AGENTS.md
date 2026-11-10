@@ -1,6 +1,13 @@
 # TradingAgents fork
 
-## Scanner-Rollenmodelle (2026-11-10)
+## VPS-Status (2026-11-10, 17:04 CET)
+
+Auf Nutzerwunsch zurueck zum urspruenglichen Qwen-Scanner ohne Gateway;
+beide TradingAgents-Dienste inaktiv und deaktiviert. Fork/Code erhalten.
+Standalone laeuft auf OpenRouter mit 60s und bewahrt aktuelle Daten; erster
+regulaerer Durchlauf nach Neustart noch offen.
+
+## Scanner-Rollenmodelle (2026-11-10, 08:13–17:04 CET, historisch)
 
 Bull, Bear und Risk optional getrennt konfigurierbar, Judge bleibt Deep-Modell.
 Responses binden alle Rollen; Audit nennt konfigurierte und, falls vom Provider
