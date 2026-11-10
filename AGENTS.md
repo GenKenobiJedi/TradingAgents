@@ -12,7 +12,8 @@ Exakter GLM-Flash-Latest-Alias fordert Reasoning aus fuer geringere Latenz;
 Qualitaetswirkung ungeprueft, Aliasziel kann wechseln.
 VPS-Gateway `tradingagents-gateway-roles.service` :18766 aktiv; Bull Mistral
 Nemo, Bear GLM-Alias, Risk/Judge Qwen Flash. Zwei isolierte BingX/OpenRouter-
-Proben ergaben VETO nach 14,79/12,31 s; 73 VPS-Tests. Natuerliche Live-Signale,
+Proben ergaben VETO nach 14,79/12,31 s; 73 VPS-Tests. Erster echter Kandidat
+WIF-LONG 08:17 CET: alle Rollen belegt, Qwen-VETO nach 44/45 s, kein Telegram.
 Timeoutquote und Trefferquote offen; altes Gateway :18765 bleibt als Standby.
 
 ## Scanner gateway (2026-11-09)
