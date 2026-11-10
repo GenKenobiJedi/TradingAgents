@@ -34,7 +34,9 @@ def decision(payload, **kwargs):
 
 import tradingagents.scanner_gateway as gateway_module
 decision.gateway_identity = {"gatewaySha256": gateway_module.GATEWAY_SHA256,
-                             "quickModel": "test/quick", "deepModel": "test/deep"}
+                             "quickModel": "test/quick", "deepModel": "test/deep",
+                             "roleModels": {"bull": "test/quick", "bear": "test/quick",
+                                            "risk": "test/quick", "judge": "test/deep"}}
 
 
 def test_valid_candidate_keeps_only_bound_structured_fields():
@@ -528,7 +530,7 @@ def test_qwen_reasoning_settings_are_scoped_to_exact_models(monkeypatch):
     assert all(kw == {"extra_body": {"usage": {"include": True}}} for _, kw in observed[4:])
 
 
-def test_qwen_reasoning_is_in_actual_local_openai_http_payload(monkeypatch, tmp_path):
+def test_role_models_and_qwen_reasoning_in_actual_local_openai_http_payload(monkeypatch, tmp_path):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import tradingagents.llm_clients as clients
     from tradingagents.llm_clients.openai_client import NormalizedChatOpenAI
@@ -542,7 +544,8 @@ def test_qwen_reasoning_is_in_actual_local_openai_http_payload(monkeypatch, tmp_
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             captured.append(payload)
             content = json.dumps({"id": "btc-test-1", "direction": "LONG", "action": "APPROVE", "reason": "Okay"}) if len(captured) == 4 else "Analysis"
-            body = json.dumps({"id": "test", "object": "chat.completion", "created": 1, "model": payload["model"],
+            resolved = "z-ai/glm-5.3-flash" if payload["model"] == "~z-ai/glm-flash-latest" else payload["model"]
+            body = json.dumps({"id": "test", "object": "chat.completion", "created": 1, "model": resolved,
                                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
                                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18, "cost": .012}}).encode()
             self.send_response(200)
@@ -563,10 +566,14 @@ def test_qwen_reasoning_is_in_actual_local_openai_http_payload(monkeypatch, tmp_
     monkeypatch.setattr(clients, "create_llm_client", lambda provider, model, **kwargs: LocalClient(model, **kwargs))
     try:
         result = process_candidate(candidate(datetime.now(timezone.utc)),
-                                   build_agent_runner("qwen/qwen3.8-flash", "qwen/qwen3.8-max-0902"))
+                                   build_agent_runner("qwen/qwen3.8-flash", "qwen/qwen3.8-max-0902",
+                                      role_models={"bull": "mistralai/mistral-nemo", "bear": "~z-ai/glm-flash-latest"}))
         assert result["action"] == "APPROVE"
         assert len(captured) == 4
-        assert all(x["reasoning"] == {"enabled": False} for x in captured[:3])
+        assert [x["model"] for x in captured] == ["mistralai/mistral-nemo", "~z-ai/glm-flash-latest",
+                                                    "qwen/qwen3.8-flash", "qwen/qwen3.8-max-0902"]
+        assert all("reasoning" not in x for x in captured[:2])
+        assert captured[2]["reasoning"] == {"enabled": False}
         assert captured[3]["reasoning"] == {"effort": "minimal"}
         assert all(x.get("max_completion_tokens", x.get("max_tokens")) == 2048 for x in captured)
         assert all(x["usage"] == {"include": True} for x in captured)
@@ -574,6 +581,9 @@ def test_qwen_reasoning_is_in_actual_local_openai_http_payload(monkeypatch, tmp_
         assert all(e["usage"]["input_tokens"] == 11 and e["usage"]["output_tokens"] == 7
                    and e["usage"]["cost_usd"] == .012 and e["usage"]["cost_status"] == "reported"
                    for e in events if e["event"] == "completed")
+        completed = [e for e in events if e["event"] == "completed"]
+        assert completed[1]["model"] == "~z-ai/glm-flash-latest"
+        assert completed[1]["resolved_model"] == "z-ai/glm-5.3-flash"
     finally:
         server.shutdown()
         server.server_close()
@@ -915,12 +925,15 @@ def test_server_identity_is_actual_module_hash_and_frozen_for_lifetime(monkeypat
     import tradingagents.scanner_gateway as gateway
     source_hash = hashlib.sha256(Path(gateway.__file__).read_bytes()).hexdigest()
     runner = gateway.build_agent_runner("test/quick", "test/deep")
-    assert runner.gateway_identity == {"gatewaySha256": source_hash, "quickModel": "test/quick", "deepModel": "test/deep"}
+    assert runner.gateway_identity == {"gatewaySha256": source_hash, "quickModel": "test/quick", "deepModel": "test/deep",
+                                       "roleModels": {"bull": "test/quick", "bear": "test/quick",
+                                                      "risk": "test/quick", "judge": "test/deep"}}
     def fake_graph(payload, **kwargs):
         return decision(payload)
     fake_graph.gateway_identity = dict(runner.gateway_identity)
     handler = gateway.make_handler(fake_graph, "secret")
     fake_graph.gateway_identity["quickModel"] = "altered/model"
+    fake_graph.gateway_identity["roleModels"]["bull"] = "altered/model"
     server = HTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -934,7 +947,116 @@ def test_server_identity_is_actual_module_hash_and_frozen_for_lifetime(monkeypat
         assert result["action"] == "APPROVE"
         assert result["gatewaySha256"] == source_hash
         assert result["quickModel"] == "test/quick" and result["deepModel"] == "test/deep"
+        assert result["roleModels"]["bull"] == "test/quick"
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_role_models_are_used_and_provider_resolution_is_audited(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    import tradingagents.llm_clients as clients
+    from tradingagents.scanner_gateway import build_agent_runner
+
+    calls = []
+    class FakeLLM:
+        def __init__(self, model):
+            self.model = model
+        async def ainvoke(self, messages, **kwargs):
+            calls.append(self.model)
+            content = (json.dumps({'id': 'btc-test-1', 'direction': 'LONG', 'action': 'APPROVE', 'reason': 'OK'})
+                       if len(calls) == 4 else 'Analysis')
+            resolved = 'z-ai/glm-5.3-flash' if self.model.startswith('~') else self.model
+            return SimpleNamespace(content=content, response_metadata={'finish_reason': 'stop', 'model_name': resolved})
+    class FakeClient:
+        def __init__(self, model):
+            self.model = model
+        def get_llm(self):
+            return FakeLLM(self.model)
+    monkeypatch.setattr(clients, 'create_llm_client', lambda provider, model, **kwargs: FakeClient(model))
+    expected = {'bull': 'mistralai/mistral-nemo', 'bear': '~z-ai/glm-flash-latest',
+                'risk': 'qwen/qwen3.8-flash', 'judge': 'qwen/qwen3.8-flash'}
+    runner = build_agent_runner('qwen/qwen3.8-flash', 'qwen/qwen3.8-flash',
+                                role_models={k: v for k, v in expected.items() if k != 'judge'})
+    assert runner.gateway_identity['roleModels'] == expected
+    assert process_candidate(candidate(datetime.now(timezone.utc)), runner)['action'] == 'APPROVE'
+    assert calls == list(expected.values())
+    events = [json.loads(line) for line in (tmp_path / 'audit' / 'openrouter-usage.jsonl').read_text().splitlines()]
+    completed = [event for event in events if event['event'] == 'completed']
+    assert [(event['role'], event['model']) for event in completed] == list(expected.items())
+    assert completed[1]['resolved_model'] == 'z-ai/glm-5.3-flash'
+
+
+@pytest.mark.parametrize('overrides', [
+    {'bull': ''}, {'bear': '~'}, {'risk': 'bad/model\nAuthorization: secret'},
+    {'judge': 'other/model'}, {'unknown': 'test/model'},
+])
+def test_invalid_explicit_role_models_are_rejected(overrides):
+    from tradingagents.scanner_gateway import build_agent_runner
+    with pytest.raises(ValueError):
+        build_agent_runner('test/quick', 'test/deep', role_models=overrides)
+
+
+def test_role_environment_overrides_fallback_and_binds_response(monkeypatch):
+    import tradingagents.scanner_gateway as gateway
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'fake')
+    monkeypatch.setenv('TRADINGAGENTS_GATE_TOKEN', 'fake')
+    monkeypatch.setenv('TRADINGAGENTS_QUICK_THINK_LLM', 'test/quick')
+    monkeypatch.setenv('TRADINGAGENTS_DEEP_THINK_LLM', 'test/judge')
+    monkeypatch.setenv('TRADINGAGENTS_BULL_MODEL', 'mistralai/mistral-nemo')
+    monkeypatch.setenv('TRADINGAGENTS_BEAR_MODEL', '~z-ai/glm-flash-latest')
+    monkeypatch.delenv('TRADINGAGENTS_RISK_MODEL', raising=False)
+    captured = {}
+    def server(address, handler):
+        captured['handler'] = handler
+        class Dummy:
+            def serve_forever(self):
+                pass
+        return Dummy()
+    monkeypatch.setattr(gateway, 'HTTPServer', server)
+    gateway.main()
+    runner = gateway.build_agent_runner('test/quick', 'test/judge', role_models={
+        'bull': 'mistralai/mistral-nemo', 'bear': '~z-ai/glm-flash-latest'})
+    expected = {'bull': 'mistralai/mistral-nemo', 'bear': '~z-ai/glm-flash-latest',
+                'risk': 'test/quick', 'judge': 'test/judge'}
+    # main's handler was built from the same environment contract.
+    handler = captured['handler']
+    real_server = HTTPServer(('127.0.0.1', 0), handler)
+    thread = threading.Thread(target=real_server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = HTTPConnection('127.0.0.1', real_server.server_port, timeout=3)
+        conn.request('POST', '/v1/scanner/evaluate', '{}', {'Authorization': 'Bearer fake'})
+        response = json.loads(conn.getresponse().read())
+        assert response['roleModels'] == expected == runner.gateway_identity['roleModels']
+        conn.close()
+    finally:
+        real_server.shutdown()
+        real_server.server_close()
+        thread.join()
+
+
+def test_invalid_role_environment_prevents_server_start(monkeypatch):
+    import tradingagents.scanner_gateway as gateway
+    for key, value in {'OPENROUTER_API_KEY': 'fake', 'TRADINGAGENTS_GATE_TOKEN': 'fake',
+                       'TRADINGAGENTS_QUICK_THINK_LLM': 'test/quick',
+                       'TRADINGAGENTS_DEEP_THINK_LLM': 'test/judge',
+                       'TRADINGAGENTS_BEAR_MODEL': ''}.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(ValueError):
+        gateway.main()
+
+
+@pytest.mark.parametrize('roles', [
+    {'bull': 'test/quick', 'bear': 'test/quick', 'risk': 'test/quick'},
+    {'bull': 'test/quick', 'bear': 'test/quick', 'risk': 'test/quick', 'judge': 'wrong/model'},
+    {'bull': 'test/quick', 'bear': 'bad model', 'risk': 'test/quick', 'judge': 'test/deep'},
+])
+def test_handler_rejects_missing_invalid_or_unbound_role_identity(roles):
+    def graph(payload, **kwargs):
+        return decision(payload)
+    graph.gateway_identity = {'gatewaySha256': gateway_module.GATEWAY_SHA256,
+                              'quickModel': 'test/quick', 'deepModel': 'test/deep', 'roleModels': roles}
+    with pytest.raises(ValueError):
+        make_handler(graph, 'secret')

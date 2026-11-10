@@ -25,7 +25,12 @@ uv pip install --python ~/.cache/tradingagents-scanner-gateway/bin/python \
 
 Set `OPENROUTER_API_KEY`, `TRADINGAGENTS_GATE_TOKEN`,
 `TRADINGAGENTS_QUICK_THINK_LLM`, and `TRADINGAGENTS_DEEP_THINK_LLM` in a
-private environment, then run:
+private environment. Optional `TRADINGAGENTS_BULL_MODEL`,
+`TRADINGAGENTS_BEAR_MODEL`, and `TRADINGAGENTS_RISK_MODEL` select the individual
+analysts; an unset value uses the quick model, while a set but empty or invalid
+value prevents startup. The decision agent always uses the deep model. OpenRouter
+aliases such as `~z-ai/glm-flash-latest` are accepted; an alias can route to a
+different underlying model over time. Then run:
 
 ```sh
 ~/.cache/tradingagents-scanner-gateway/bin/python -m tradingagents.scanner_gateway
@@ -45,7 +50,9 @@ the ask for LONG and the bid for SHORT, while `entry` remains the original plan.
 For NOW (and unknown entry type), the current executable price must also remain
 strictly between stop and the first target. LIMIT keeps its planned-entry geometry.
 Responses contain `id`, `action` (`APPROVE`, `VETO`, `HOLD`) and the frozen
-`gatewaySha256`, `quickModel`, and `deepModel`. The hash identifies the gateway
+`gatewaySha256`, `quickModel`, `deepModel`, and `roleModels` with the exact
+configured `bull`, `bear`, `risk`, and `judge` identifiers. Callers must verify
+all four roles before relying on an approval. The hash identifies the gateway
 source loaded at startup. A valid model decision also contains `marketAsOf`, `expiresAt`, and a short
 `note`. The model never receives the gateway token or arbitrary Telegram text.
 
@@ -72,7 +79,9 @@ blocks the model call. `attempt_id` joins the events; a `start` without an end
 remains visible after a crash. A corrupt final audit record blocks further model
 calls without deleting or rewriting the record. Prompt and model output are never recorded.
 `usage.include=true` requests provider usage: input/output token counts and
-`cost_usd` are saved only when supplied by the provider. Missing values remain
+`cost_usd` are saved only when supplied by the provider. The configured `model`
+is logged for each call and `resolved_model` is recorded when the provider
+returns a valid concrete model identifier. Missing values remain
 null and `cost_status` is `unknown`; no cost is estimated. The audit has no
 spending limit and cannot cap OpenRouter costs.
 

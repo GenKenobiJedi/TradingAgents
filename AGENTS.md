@@ -1,5 +1,13 @@
 # TradingAgents fork
 
+## Scanner-Rollenmodelle (2026-11-10)
+
+Bull, Bear und Risk optional getrennt konfigurierbar, Judge bleibt Deep-Modell.
+Responses binden alle Rollen; Audit nennt konfigurierte und, falls vom Provider
+gemeldet, konkrete Modellkennung. OpenRouter-Alias mit fuehrendem `~` erlaubt,
+ungenutzte Rollen fallen nur bei fehlender Einstellung auf Quick zurueck.
+VPS-Umschaltung, echter Mehrmodell-Live-Test und Trefferquote noch offen.
+
 ## Scanner gateway (2026-11-09)
 
 `tradingagents.scanner_gateway` adds a bounded OpenRouter/LangGraph review of
